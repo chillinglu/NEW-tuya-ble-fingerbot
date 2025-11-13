@@ -1,11 +1,24 @@
 import time
 import pygatt
+import logging
 import hashlib
 import secrets
 from Crypto.Cipher import AES
 from struct import pack, unpack
 from enum import Enum
 from binascii import hexlify
+
+import asyncio
+import hashlib
+import secrets
+from enum import Enum
+from struct import pack, unpack
+from binascii import hexlify
+from Crypto.Cipher import AES
+from bleak import BleakClient, BleakScanner
+
+#logging.basicConfig()
+#logging.getLogger('pygatt').setLevel(logging.DEBUG)
 
 
 class Coder(Enum):
@@ -26,15 +39,15 @@ class DpType(Enum):
 
 
 class DpAction(Enum):
-    ARM_DOWN_PERCENT = 9
-    ARM_UP_PERCENT = 15
-    CLICK_SUSTAIN_TIME = 10
-    TAP_ENABLE = 17
-    MODE = 8
+    ARM_DOWN_PERCENT = 102
+    ARM_UP_PERCENT = 106
+    CLICK_SUSTAIN_TIME = 103
+    TAP_ENABLE = 107
+    MODE = 101
     INVERT_SWITCH = 11
-    TOGGLE_SWITCH = 2
-    CLICK = 101
-    PROG = 121
+    TOGGLE_SWITCH = 1
+    CLICK = 108
+    PROG = 109
 
 
 class SecretKeyManager:
@@ -60,7 +73,7 @@ class DeviceInfoResp:
     def parse(self, raw):
         device_version_major, device_version_minor, protocol_version_major, protocol_version_minor, flag, is_bind, srand, hardware_version_major, hardware_version_minor, auth_key = unpack('>BBBBBB6sBB32s', raw[:46])
         auth_key = hexlify(auth_key)
-        # print(device_version_major, device_version_minor, protocol_version_major, protocol_version_minor, srand, hardware_version_major, hardware_version_minor, auth_key)
+        print(device_version_major, device_version_minor, protocol_version_major, protocol_version_minor, srand, hardware_version_major, hardware_version_minor, auth_key)
 
         self.device_version = '{}.{}'.format(device_version_major, device_version_minor)
         self.protocol_version = '{}.{}'.format(protocol_version_major, protocol_version_minor)
@@ -91,7 +104,7 @@ class Ret:
 
         sn, sn_ack, code, length = unpack('>IIHH', decrypted_data[:12])
         raw_data = decrypted_data[12:12 + length]
-        # print(sn, sn_ack, code, length, raw_data)
+        print(sn, sn_ack, code, length, raw_data)
 
         self.resp = None
         try:
@@ -266,6 +279,8 @@ class XRequest:
 
         return self.split_packet(2, encrypted_data)
 
+
+
 class FingerBot:
     NOTIF_UUID = '00002b10-0000-1000-8000-00805f9b34fb'
     CHAR_UUID =  '00002b11-0000-1000-8000-00805f9b34fb'
@@ -279,21 +294,28 @@ class FingerBot:
         self.secret_key_manager = SecretKeyManager(self.login_key)
         self.ble_receiver = BleReceiver(self.secret_key_manager)
 
-        self.adapter = pygatt.GATTToolBackend(hci_device='hci1')
+        self.adapter = pygatt.GATTToolBackend(hci_device='hci0')
         self.reset_sn_ack()
 
     def connect(self):
         self.adapter.start()
 
         self.device = self.adapter.connect(self.mac, address_type=pygatt.BLEAddressType.public)
+        
+        print('Discovering characteristics...')
+        chars = self.device.discover_characteristics()
+
+        self.device.char_write_handle(13, bytearray([0x01, 0x00]), wait_for_response=False)
         self.device.subscribe(self.NOTIF_UUID, callback=self.handle_notification)
 
         print('Connecting...')
         req = self.device_info_request()
         self.send_request(req)
+        print(req)
 
         while True:
             time.sleep(10)
+
 
     def next_sn_ack(self):
         self.sn_ack += 1
@@ -303,9 +325,10 @@ class FingerBot:
         self.sn_ack = 0
 
     def handle_notification(self, handle, value):
-        # print('<<', hexlify(value))
+        print('<<', hexlify(value))
         ret = self.ble_receiver.parse_data_received(value)
         if not ret:
+            print('Packet not parsed yet.')
             return
 
         if ret.code == Coder.FUN_SENDER_DEVICE_INFO:
@@ -324,7 +347,7 @@ class FingerBot:
     def send_request(self, xrequest):
         packets = xrequest.pack()
         for cmd in packets:
-            # print('  >>', hexlify(cmd))
+            print('  >>', hexlify(cmd))
             self.device.char_write(self.CHAR_UUID, value=cmd, wait_for_response=False)
 
     def device_info_request(self):
@@ -361,7 +384,7 @@ class FingerBot:
         dps = [
             [8, DpType.ENUM, 0],
             [DpAction.ARM_DOWN_PERCENT, DpType.INT, 80],
-            [DpAction.ARM_UP_PERCENT, DpType.INT, 0],
+            [DpAction.ARM_UP_PERCENT, DpType.INT, 80],
             [DpAction.CLICK_SUSTAIN_TIME, DpType.INT, 0],
             [DpAction.CLICK, DpType.BOOLEAN, True],
         ]
@@ -387,7 +410,7 @@ class FingerBot:
                 length = 1
                 raw += pack('>BB', length, dp_value)
 
-        # print(hexlify(raw))
+        print(hexlify(raw))
         sn_ack = self.next_sn_ack()
         return XRequest(sn_ack=sn_ack, ack_sn=0, code=Coder.FUN_SENDER_DPS, security_flag=security_flag, secret_key=secret_key, iv=iv, inp=raw)
 
